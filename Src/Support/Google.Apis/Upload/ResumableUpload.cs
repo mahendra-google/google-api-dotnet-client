@@ -63,6 +63,228 @@ namespace Google.Apis.Upload
         /// </summary>
         internal int BufferSize = 4 * KB;
 
+        /// <summary>
+        /// The minimum chunk size multiple.
+        /// All intermediate chunks must be a multiple of this size.
+        /// </summary>
+        public const int MinimumChunkMultiple = 256 * KB;
+
+        #region Manual Chunk Uploading
+
+        /// <summary>
+        /// A stream wrapper that delegates all operations to an underlying stream but does not dispose it.
+        /// </summary>
+        private class NonDisposingStreamWrapper : Stream
+        {
+            private readonly Stream _inner;
+
+            public NonDisposingStreamWrapper(Stream inner)
+            {
+                _inner = inner;
+            }
+
+            public override bool CanRead => _inner.CanRead;
+            public override bool CanSeek => _inner.CanSeek;
+            public override bool CanWrite => _inner.CanWrite;
+            public override bool CanTimeout => _inner.CanTimeout;
+            public override long Length => _inner.Length;
+            public override long Position
+            {
+                get => _inner.Position;
+                set => _inner.Position = value;
+            }
+            public override void Flush() => _inner.Flush();
+            public override Task FlushAsync(CancellationToken cancellationToken) => _inner.FlushAsync(cancellationToken);
+            public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+            public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+                _inner.ReadAsync(buffer, offset, count, cancellationToken);
+            public override long Seek(long offset, SeekOrigin origin) => _inner.Seek(offset, origin);
+            public override void SetLength(long value) => _inner.SetLength(value);
+            public override void Write(byte[] buffer, int offset, int count) => _inner.Write(buffer, offset, count);
+            public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
+                _inner.WriteAsync(buffer, offset, count, cancellationToken);
+            public override void Close() { }
+            protected override void Dispose(bool disposing) { }
+        }
+
+        /// <summary>
+        /// Uploads a single chunk of data to the resumable upload session without assuming the 
+        /// entire stream has finished.
+        /// </summary>
+        public async Task<IUploadProgress> UploadChunkAsync(
+            Stream chunkStream,
+            bool isFinalChunk,
+            long? totalKnownSize = null,
+            CancellationToken cancellationToken = default)
+        {
+            chunkStream.ThrowIfNull(nameof(chunkStream));
+
+            if (UploadUri == null)
+            {
+                throw new InvalidOperationException(
+                    "Upload session has not been initiated. Call InitiateSessionAsync first or create via CreateFromUploadUri.");
+            }
+
+            long chunkLength;
+            if (chunkStream.CanSeek)
+            {
+                chunkLength = chunkStream.Length - chunkStream.Position;
+            }
+            else
+            {
+                using var buffer = new MemoryStream();
+                await chunkStream.CopyToAsync(buffer, 64 * KB, cancellationToken).ConfigureAwait(false);
+                buffer.Position = 0;
+                return await UploadChunkAsync(buffer, isFinalChunk, totalKnownSize, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (!isFinalChunk && (chunkLength % MinimumChunkMultiple != 0))
+            {
+                throw new ArgumentException(
+                    $"Intermediate chunk size ({chunkLength} bytes) must be a multiple of 256 KiB (262,144 bytes). " +
+                    "Only the final chunk can have an arbitrary byte size.", nameof(chunkStream));
+            }
+
+            long chunkStart = BytesServerReceived;
+            long chunkEnd = chunkStart + chunkLength - 1;
+
+            string totalLengthStr;
+            if (isFinalChunk)
+            {
+                long totalBytes = chunkStart + chunkLength;
+                StreamLength = totalBytes;
+                totalLengthStr = totalBytes.ToString();
+            }
+            else
+            {
+                totalLengthStr = totalKnownSize?.ToString() ?? "*";
+            }
+
+            using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
+            var content = new StreamContent(new NonDisposingStreamWrapper(chunkStream));
+            request.Content = content;
+            request.Content.Headers.Remove("Content-Range");
+            request.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {chunkStart}-{chunkEnd}/{totalLengthStr}");
+
+            if (isFinalChunk)
+            {
+                LastRequestExecuting?.Invoke(request);
+            }
+
+            Logger.Debug("ResumableUpload[{0}] - Uploading chunk bytes={1}-{2}/{3}", UploadUri, chunkStart, chunkEnd, totalLengthStr);
+
+            HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (response.StatusCode == (HttpStatusCode)308)
+            {
+                string range = response.Headers.TryGetValues("Range", out var values) ? values.FirstOrDefault() : null;
+                BytesServerReceived = GetNextByte(range);
+                BytesClientSent = BytesServerReceived;
+
+                var progress = new ResumableUploadProgress(UploadStatus.Uploading, BytesServerReceived);
+                UpdateProgress(progress);
+                return progress;
+            }
+            else if (response.IsSuccessStatusCode)
+            {
+                if (isFinalChunk)
+                {
+                    StreamLength = chunkStart + chunkLength;
+                }
+                MediaCompleted(response);
+                var progress = new ResumableUploadProgress(UploadStatus.Completed, BytesServerReceived);
+                UpdateProgress(progress);
+                return progress;
+            }
+
+            throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Synchronous wrapper for <see cref="UploadChunkAsync"/>.
+        /// </summary>
+        public IUploadProgress UploadChunk(Stream chunkStream, bool isFinalChunk, long? totalKnownSize = null)
+        {
+            return UploadChunkAsync(chunkStream, isFinalChunk, totalKnownSize, CancellationToken.None).Result;
+        }
+
+        /// <summary>
+        /// Finalizes an upload when all bytes were already sent in intermediate chunks.
+        /// </summary>
+        public async Task<IUploadProgress> FinalizeUploadAsync(long totalSize, CancellationToken cancellationToken = default)
+        {
+            if (UploadUri == null)
+            {
+                throw new InvalidOperationException("Upload session has not been initiated.");
+            }
+
+            using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
+            request.SetEmptyContent().Headers.TryAddWithoutValidation("Content-Range", $"bytes */{totalSize}");
+
+            LastRequestExecuting?.Invoke(request);
+
+            HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (response.IsSuccessStatusCode)
+            {
+                StreamLength = totalSize;
+                MediaCompleted(response);
+                var progress = new ResumableUploadProgress(UploadStatus.Completed, totalSize);
+                UpdateProgress(progress);
+                return progress;
+            }
+
+            throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Synchronous wrapper for <see cref="FinalizeUploadAsync"/>.
+        /// </summary>
+        public IUploadProgress FinalizeUpload(long totalSize)
+        {
+            return FinalizeUploadAsync(totalSize, CancellationToken.None).Result;
+        }
+
+        /// <summary>
+        /// Queries an upload for the current committed byte offset ('Content-Range: bytes */*').
+        /// </summary>
+        public async Task<long> QueryUploadStatusAsync(CancellationToken cancellationToken = default)
+        {
+            if (UploadUri == null)
+            {
+                throw new InvalidOperationException("Upload session has not been initiated.");
+            }
+
+            using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
+            request.SetEmptyContent().Headers.TryAddWithoutValidation("Content-Range", "bytes */*");
+
+            HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (response.StatusCode == (HttpStatusCode)308)
+            {
+                string range = response.Headers.TryGetValues("Range", out var values) ? values.FirstOrDefault() : null;
+                BytesServerReceived = GetNextByte(range);
+                return BytesServerReceived;
+            }
+            else if (response.IsSuccessStatusCode)
+            {
+                MediaCompleted(response);
+                return BytesServerReceived;
+            }
+
+            throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Synchronous wrapper for <see cref="QueryUploadStatusAsync"/>.
+        /// </summary>
+        public long QueryUploadStatus()
+        {
+            return QueryUploadStatusAsync(CancellationToken.None).Result;
+        }
+
+        #endregion
+
         /// <summary>Indicates the stream's size is unknown.</summary>
         private const int UnknownSize = -1;
         /// <summary>Content-Range header value for the body upload of zero length files.</summary>
@@ -119,10 +341,12 @@ namespace Google.Apis.Upload
                 : base(contentStream, options)
             {
                 _initiatedUploadUri = uploadUri;
+                UploadUri = uploadUri;
             }
 
             public override Task<Uri> InitiateSessionAsync(CancellationToken cancellationToken = default(CancellationToken))
             {
+                UploadUri = _initiatedUploadUri;
                 return Task.FromResult(_initiatedUploadUri);
             }
         }
@@ -164,7 +388,7 @@ namespace Google.Apis.Upload
         /// Gets or sets the resumable session URI. 
         /// See https://developers.google.com/drive/manage-uploads#save-session-uri" for more details.
         /// </summary>
-        private Uri UploadUri { get; set; }
+        protected internal Uri UploadUri { get; set; }
 
         /// <summary>Gets or sets the amount of bytes the server had received so far.</summary>
         private long BytesServerReceived { get; set; }
@@ -1151,7 +1375,8 @@ namespace Google.Apis.Upload
             {
                 throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
             }
-            return response.Headers.Location;
+            UploadUri = response.Headers.Location;
+            return UploadUri;
         }
 
         /// <summary>Creates a request to initialize a request.</summary>
