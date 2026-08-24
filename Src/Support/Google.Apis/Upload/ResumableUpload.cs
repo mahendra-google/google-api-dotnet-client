@@ -115,6 +115,7 @@ namespace Google.Apis.Upload
             Stream chunkStream,
             bool isFinalChunk,
             long? totalKnownSize = null,
+            long? rangeStart = null,
             CancellationToken cancellationToken = default)
         {
             chunkStream.ThrowIfNull(nameof(chunkStream));
@@ -135,7 +136,7 @@ namespace Google.Apis.Upload
                 using var buffer = new MemoryStream();
                 await chunkStream.CopyToAsync(buffer, 64 * KB, cancellationToken).ConfigureAwait(false);
                 buffer.Position = 0;
-                return await UploadChunkAsync(buffer, isFinalChunk, totalKnownSize, cancellationToken).ConfigureAwait(false);
+                return await UploadChunkAsync(buffer, isFinalChunk, totalKnownSize, rangeStart, cancellationToken).ConfigureAwait(false);
             }
 
             if (!isFinalChunk && (chunkLength % MinimumChunkMultiple != 0))
@@ -145,7 +146,7 @@ namespace Google.Apis.Upload
                     "Only the final chunk can have an arbitrary byte size.", nameof(chunkStream));
             }
 
-            long chunkStart = BytesServerReceived;
+            long chunkStart = rangeStart ?? BytesServerReceived;
             long chunkEnd = chunkStart + chunkLength - 1;
 
             string totalLengthStr;
@@ -203,9 +204,9 @@ namespace Google.Apis.Upload
         /// <summary>
         /// Synchronous wrapper for <see cref="UploadChunkAsync"/>.
         /// </summary>
-        public IUploadProgress UploadChunk(Stream chunkStream, bool isFinalChunk, long? totalKnownSize = null)
+        public IUploadProgress UploadChunk(Stream chunkStream, bool isFinalChunk, long? totalKnownSize = null, long? rangeStart = null)
         {
-            return UploadChunkAsync(chunkStream, isFinalChunk, totalKnownSize, CancellationToken.None).Result;
+            return UploadChunkAsync(chunkStream, isFinalChunk, totalKnownSize, rangeStart, CancellationToken.None).Result;
         }
 
         /// <summary>
