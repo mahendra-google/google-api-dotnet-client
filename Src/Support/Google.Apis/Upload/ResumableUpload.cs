@@ -108,9 +108,27 @@ namespace Google.Apis.Upload
         }
 
         /// <summary>
-        /// Uploads a single chunk of data to the resumable upload session without assuming the 
-        /// entire stream has finished.
+        /// Uploads a discrete chunk of data to an active resumable upload session without assuming the entire stream has finished.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Non-final chunks (<paramref name="isFinalChunk"/> is <c>false</c>) must have a byte length that is an exact multiple
+        /// of 256 KiB (<see cref="MinimumChunkMultiple"/>, 262,144 bytes). The final chunk (<paramref name="isFinalChunk"/> is <c>true</c>)
+        /// may be of any arbitrary byte size.
+        /// </para>
+        /// <para>
+        /// If <paramref name="rangeStart"/> is specified, the chunk is uploaded starting at that byte offset. If <paramref name="rangeStart"/>
+        /// is <c>null</c>, the internal server received byte offset (<see cref="BytesServerReceived"/>) is used.
+        /// </para>
+        /// <para>
+        /// The provided <paramref name="chunkStream"/> will not be closed or disposed by this operation.
+        /// </para>
+        /// </remarks>
+        /// <param name="chunkStream">The stream containing data for this chunk. Must not be null.</param>
+        /// <param name="isFinalChunk"><c>true</c> if this is the final chunk completing the upload; <c>false</c> if more chunks follow.</param>
+        /// <param name="totalKnownSize">The total known size of the object if known upfront, or <c>null</c> if unknown.</param>
+        /// <param name="rangeStart">The starting byte offset for this chunk. If <c>null</c>, the current tracked offset is used.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         public async Task<IUploadProgress> UploadChunkAsync(
             Stream chunkStream,
             bool isFinalChunk,
@@ -144,6 +162,11 @@ namespace Google.Apis.Upload
                 throw new ArgumentException(
                     $"Intermediate chunk size ({chunkLength} bytes) must be a multiple of 256 KiB (262,144 bytes). " +
                     "Only the final chunk can have an arbitrary byte size.", nameof(chunkStream));
+            }
+            if (chunkLength == 0 && isFinalChunk)
+            {
+                long totalBytes = totalKnownSize ?? (rangeStart ?? BytesServerReceived);
+                return await FinalizeUploadAsync(totalBytes, cancellationToken).ConfigureAwait(false);
             }
 
             long chunkStart = rangeStart ?? BytesServerReceived;
@@ -202,16 +225,25 @@ namespace Google.Apis.Upload
         }
 
         /// <summary>
-        /// Synchronous wrapper for <see cref="UploadChunkAsync"/>.
+        /// Synchronous wrapper for <see cref="UploadChunkAsync(Stream, bool, long?, long?, CancellationToken)"/>.
         /// </summary>
+        /// <param name="chunkStream">The stream containing data for this chunk. Must not be null.</param>
+        /// <param name="isFinalChunk"><c>true</c> if this is the final chunk completing the upload; <c>false</c> if more chunks follow.</param>
+        /// <param name="totalKnownSize">The total known size of the object if known upfront, or <c>null</c> if unknown.</param>
+        /// <param name="rangeStart">The starting byte offset for this chunk. If <c>null</c>, the current tracked offset is used.</param>
         public IUploadProgress UploadChunk(Stream chunkStream, bool isFinalChunk, long? totalKnownSize = null, long? rangeStart = null)
         {
             return UploadChunkAsync(chunkStream, isFinalChunk, totalKnownSize, rangeStart, CancellationToken.None).Result;
         }
 
         /// <summary>
-        /// Finalizes an upload when all bytes were already sent in intermediate chunks.
+        /// Finalizes an active resumable upload session when all data bytes were already uploaded in prior intermediate chunks.
         /// </summary>
+        /// <remarks>
+        /// This sends an empty body request with a <c>Content-Range: bytes */TOTAL</c> header to commit and finalize the upload.
+        /// </remarks>
+        /// <param name="totalSize">The total size of the uploaded object in bytes. Must be non-negative.</param>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         public async Task<IUploadProgress> FinalizeUploadAsync(long totalSize, CancellationToken cancellationToken = default)
         {
             if (UploadUri == null)
@@ -239,16 +271,21 @@ namespace Google.Apis.Upload
         }
 
         /// <summary>
-        /// Synchronous wrapper for <see cref="FinalizeUploadAsync"/>.
+        /// Synchronous wrapper for <see cref="FinalizeUploadAsync(long, CancellationToken)"/>.
         /// </summary>
+        /// <param name="totalSize">The total size of the uploaded object in bytes. Must be non-negative.</param>
         public IUploadProgress FinalizeUpload(long totalSize)
         {
             return FinalizeUploadAsync(totalSize, CancellationToken.None).Result;
         }
 
         /// <summary>
-        /// Queries an upload for the current committed byte offset ('Content-Range: bytes */*').
+        /// Queries the upload session for the current committed byte offset on the server.
         /// </summary>
+        /// <remarks>
+        /// Sends an empty body request with a <c>Content-Range: bytes */*</c> header to determine how many bytes have been successfully persisted.
+        /// </remarks>
+        /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         public async Task<long> QueryUploadStatusAsync(CancellationToken cancellationToken = default)
         {
             if (UploadUri == null)
@@ -277,7 +314,7 @@ namespace Google.Apis.Upload
         }
 
         /// <summary>
-        /// Synchronous wrapper for <see cref="QueryUploadStatusAsync"/>.
+        /// Synchronous wrapper for <see cref="QueryUploadStatusAsync(CancellationToken)"/>.
         /// </summary>
         public long QueryUploadStatus()
         {
