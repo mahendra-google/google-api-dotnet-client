@@ -137,89 +137,99 @@ namespace Google.Apis.Upload
             CancellationToken cancellationToken = default)
         {
             chunkStream.ThrowIfNull(nameof(chunkStream));
-
-            if (UploadUri == null)
+            try
             {
-                throw new InvalidOperationException(
-                    "Upload session has not been initiated. Call InitiateSessionAsync first or create via CreateFromUploadUri.");
-            }
+                if (UploadUri == null)
+                {
+                    throw new InvalidOperationException(
+                        "Upload session has not been initiated. Call InitiateSessionAsync first or create via CreateFromUploadUri.");
+                }
 
-            long chunkLength;
-            if (chunkStream.CanSeek)
-            {
-                chunkLength = chunkStream.Length - chunkStream.Position;
-            }
-            else
-            {
-                using var buffer = new MemoryStream();
-                await chunkStream.CopyToAsync(buffer, 64 * KB, cancellationToken).ConfigureAwait(false);
-                buffer.Position = 0;
-                return await UploadChunkAsync(buffer, isFinalChunk, totalKnownSize, rangeStart, cancellationToken).ConfigureAwait(false);
-            }
+                long chunkLength;
+                if (chunkStream.CanSeek)
+                {
+                    chunkLength = chunkStream.Length - chunkStream.Position;
+                }
+                else
+                {
+                    using var buffer = new MemoryStream();
+                    await chunkStream.CopyToAsync(buffer, 64 * KB, cancellationToken).ConfigureAwait(false);
+                    buffer.Position = 0;
+                    return await UploadChunkAsync(buffer, isFinalChunk, totalKnownSize, rangeStart, cancellationToken).ConfigureAwait(false);
+                }
 
-            if (!isFinalChunk && (chunkLength % MinimumChunkMultiple != 0))
-            {
-                throw new ArgumentException(
-                    $"Intermediate chunk size ({chunkLength} bytes) must be a multiple of 256 KiB (262,144 bytes). " +
-                    "Only the final chunk can have an arbitrary byte size.", nameof(chunkStream));
-            }
-            if (chunkLength == 0 && isFinalChunk)
-            {
-                long totalBytes = totalKnownSize ?? (rangeStart ?? BytesServerReceived);
-                return await FinalizeUploadAsync(totalBytes, cancellationToken).ConfigureAwait(false);
-            }
+                if (!isFinalChunk && (chunkLength % MinimumChunkMultiple != 0))
+                {
+                    throw new ArgumentException(
+                        $"Intermediate chunk size ({chunkLength} bytes) must be a multiple of 256 KiB (262,144 bytes). " +
+                        "Only the final chunk can have an arbitrary byte size.", nameof(chunkStream));
+                }
+                if (chunkLength == 0 && isFinalChunk)
+                {
+                    long totalBytes = totalKnownSize ?? (rangeStart ?? BytesServerReceived);
+                    return await FinalizeUploadAsync(totalBytes, cancellationToken).ConfigureAwait(false);
+                }
 
-            long chunkStart = rangeStart ?? BytesServerReceived;
-            long chunkEnd = chunkStart + chunkLength - 1;
+                long chunkStart = rangeStart ?? BytesServerReceived;
+                long chunkEnd = chunkStart + chunkLength - 1;
 
-            string totalLengthStr;
-            if (isFinalChunk)
-            {
-                long totalBytes = chunkStart + chunkLength;
-                StreamLength = totalBytes;
-                totalLengthStr = totalBytes.ToString();
-            }
-            else
-            {
-                totalLengthStr = totalKnownSize?.ToString() ?? "*";
-            }
-
-            using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
-            var content = new StreamContent(new NonDisposingStreamWrapper(chunkStream));
-            request.Content = content;
-            request.Content.Headers.Remove("Content-Range");
-            request.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {chunkStart}-{chunkEnd}/{totalLengthStr}");
-
-            if (isFinalChunk)
-            {
-                LastRequestExecuting?.Invoke(request);
-            }
-
-            Logger.Debug("ResumableUpload[{0}] - Uploading chunk bytes={1}-{2}/{3}", UploadUri, chunkStart, chunkEnd, totalLengthStr);
-
-            HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-
-            if (response.StatusCode == (HttpStatusCode)308)
-            {
-                string range = response.Headers.TryGetValues("Range", out var values) ? values.FirstOrDefault() : null;
-                BytesServerReceived = GetNextByte(range);
-                BytesClientSent = BytesServerReceived;
-
-                var progress = new ResumableUploadProgress(UploadStatus.Uploading, BytesServerReceived);
-                UpdateProgress(progress);
-                return progress;
-            }
-            else if (response.IsSuccessStatusCode)
-            {
+                string totalLengthStr;
                 if (isFinalChunk)
                 {
-                    StreamLength = chunkStart + chunkLength;
+                    long totalBytes = chunkStart + chunkLength;
+                    StreamLength = totalBytes;
+                    totalLengthStr = totalBytes.ToString();
                 }
-                MediaCompleted(response);
-                var progress = new ResumableUploadProgress(UploadStatus.Completed, BytesServerReceived);
+                else
+                {
+                    totalLengthStr = totalKnownSize?.ToString() ?? "*";
+                }
+
+                using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
+                var content = new StreamContent(new NonDisposingStreamWrapper(chunkStream));
+                request.Content = content;
+                request.Content.Headers.Remove("Content-Range");
+                request.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {chunkStart}-{chunkEnd}/{totalLengthStr}");
+
+                if (isFinalChunk)
+                {
+                    LastRequestExecuting?.Invoke(request);
+                }
+
+                Logger.Debug("ResumableUpload[{0}] - Uploading chunk bytes={1}-{2}/{3}", UploadUri, chunkStart, chunkEnd, totalLengthStr);
+
+                HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+                if (response.StatusCode == (HttpStatusCode)308)
+                {
+                    string range = response.Headers.TryGetValues("Range", out var values) ? values.FirstOrDefault() : null;
+                    BytesServerReceived = GetNextByte(range);
+                    BytesClientSent = BytesServerReceived;
+
+                    var progress = new ResumableUploadProgress(UploadStatus.Uploading, BytesServerReceived);
+                    UpdateProgress(progress);
+                    return progress;
+                }
+                else if (response.IsSuccessStatusCode)
+                {
+                    if (isFinalChunk)
+                    {
+                        StreamLength = chunkStart + chunkLength;
+                    }
+                    MediaCompleted(response);
+                    var progress = new ResumableUploadProgress(UploadStatus.Completed, BytesServerReceived);
+                    UpdateProgress(progress);
+                    return progress;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "MediaUpload[{0}] - Exception occurred while finalzing media", UploadUri);
+                var progress = new ResumableUploadProgress(UploadStatus.Failed, BytesServerReceived);
                 UpdateProgress(progress);
                 return progress;
             }
+            return Progress;
         }
 
         /// <summary>
@@ -244,26 +254,37 @@ namespace Google.Apis.Upload
         /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         public async Task<IUploadProgress> FinalizeUploadAsync(long totalSize, CancellationToken cancellationToken = default)
         {
-            if (UploadUri == null)
+            try
             {
-                throw new InvalidOperationException("Upload session has not been initiated.");
+                if (UploadUri == null)
+                {
+                    throw new InvalidOperationException("Upload session has not been initiated.");
+                }
+
+                using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
+                request.SetEmptyContent().Headers.TryAddWithoutValidation("Content-Range", $"bytes */{totalSize}");
+
+                LastRequestExecuting?.Invoke(request);
+
+                HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    StreamLength = totalSize;
+                    MediaCompleted(response);
+                    var progress = new ResumableUploadProgress(UploadStatus.Completed, totalSize);
+                    UpdateProgress(progress);
+                    return progress;
+                }
             }
-
-            using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
-            request.SetEmptyContent().Headers.TryAddWithoutValidation("Content-Range", $"bytes */{totalSize}");
-
-            LastRequestExecuting?.Invoke(request);
-
-            HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-
-            if (response.IsSuccessStatusCode)
+            catch (Exception ex)
             {
-                StreamLength = totalSize;
-                MediaCompleted(response);
-                var progress = new ResumableUploadProgress(UploadStatus.Completed, totalSize);
+                Logger.Error(ex, "MediaUpload[{0}] - Exception occurred while finalzing media", UploadUri);
+                var progress = new ResumableUploadProgress(UploadStatus.Failed, totalSize);
                 UpdateProgress(progress);
                 return progress;
             }
+            return Progress;
         }
 
         /// <summary>
@@ -305,6 +326,7 @@ namespace Google.Apis.Upload
                 MediaCompleted(response);
                 return BytesServerReceived;
             }
+            return BytesServerReceived;
         }
 
         /// <summary>
