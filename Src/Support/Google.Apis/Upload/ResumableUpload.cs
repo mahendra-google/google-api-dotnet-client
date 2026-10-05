@@ -220,8 +220,6 @@ namespace Google.Apis.Upload
                 UpdateProgress(progress);
                 return progress;
             }
-
-            throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -266,8 +264,6 @@ namespace Google.Apis.Upload
                 UpdateProgress(progress);
                 return progress;
             }
-
-            throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -309,8 +305,6 @@ namespace Google.Apis.Upload
                 MediaCompleted(response);
                 return BytesServerReceived;
             }
-
-            throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
         }
 
         /// <summary>
