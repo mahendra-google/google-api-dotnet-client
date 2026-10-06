@@ -127,7 +127,17 @@ namespace Google.Apis.Upload
         /// <param name="chunkStream">The stream containing data for this chunk. Must not be null.</param>
         /// <param name="isFinalChunk"><c>true</c> if this is the final chunk completing the upload; <c>false</c> if more chunks follow.</param>
         /// <param name="totalKnownSize">The total known size of the object if known upfront, or <c>null</c> if unknown.</param>
-        /// <param name="rangeStart">The starting byte offset for this chunk. If <c>null</c>, the current tracked offset is used.</param>
+        /// <param name="rangeStart">
+        /// The starting byte offset for this chunk.
+        /// <para>
+        /// Passing an explicit offset avoids an extra <c>QueryUploadStatusAsync</c> call:
+        /// <list type="bullet">
+        /// <item><description>Pass <c>0</c> for the initial chunk.</description></item>
+        /// <item><description>Pass the current offset if it is already tracked by the caller.</description></item>
+        /// </list>
+        /// If <c>null</c>, the method queries the upload status to retrieve the current offset.
+        /// </para>
+        /// </param>
         /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         public async Task<IUploadProgress> UploadChunkAsync(
             Stream chunkStream,
@@ -238,7 +248,17 @@ namespace Google.Apis.Upload
         /// <param name="chunkStream">The stream containing data for this chunk. Must not be null.</param>
         /// <param name="isFinalChunk"><c>true</c> if this is the final chunk completing the upload; <c>false</c> if more chunks follow.</param>
         /// <param name="totalKnownSize">The total known size of the object if known upfront, or <c>null</c> if unknown.</param>
-        /// <param name="rangeStart">The starting byte offset for this chunk. If <c>null</c>, the current tracked offset is used.</param>
+        /// <param name="rangeStart">
+        /// The starting byte offset for this chunk.
+        /// <para>
+        /// Passing an explicit offset avoids an extra <c>QueryUploadStatusAsync</c> call:
+        /// <list type="bullet">
+        /// <item><description>Pass <c>0</c> for the initial chunk.</description></item>
+        /// <item><description>Pass the current offset if it is already tracked by the caller.</description></item>
+        /// </list>
+        /// If <c>null</c>, the method queries the upload status to retrieve the current offset.
+        /// </para>
+        /// </param>
         public IUploadProgress UploadChunk(Stream chunkStream, bool isFinalChunk, long? totalKnownSize = null, long? rangeStart = null)
         {
             return UploadChunkAsync(chunkStream, isFinalChunk, totalKnownSize, rangeStart, CancellationToken.None).Result;
