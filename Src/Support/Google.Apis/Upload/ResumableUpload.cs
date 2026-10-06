@@ -235,7 +235,7 @@ namespace Google.Apis.Upload
             catch (Exception ex)
             {
                 Logger.Error(ex, "MediaUpload[{0}] - Exception occurred while finalzing media", UploadUri);
-                var progress = new ResumableUploadProgress(UploadStatus.Failed, BytesServerReceived);
+                var progress = new ResumableUploadProgress(ex, BytesServerReceived);
                 UpdateProgress(progress);
                 return progress;
             }
@@ -300,7 +300,7 @@ namespace Google.Apis.Upload
             catch (Exception ex)
             {
                 Logger.Error(ex, "MediaUpload[{0}] - Exception occurred while finalzing media", UploadUri);
-                var progress = new ResumableUploadProgress(UploadStatus.Failed, totalSize);
+                var progress = new ResumableUploadProgress(ex, totalSize);
                 UpdateProgress(progress);
                 return progress;
             }
