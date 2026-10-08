@@ -156,16 +156,24 @@ namespace Google.Apis.Upload
                 }
 
                 long chunkLength;
+                HttpContent content;
                 if (chunkStream.CanSeek)
                 {
                     chunkLength = chunkStream.Length - chunkStream.Position;
+                    content = new StreamContent(new NonDisposingStreamWrapper(chunkStream));
                 }
                 else
                 {
-                    using var buffer = new MemoryStream();
-                    await chunkStream.CopyToAsync(buffer, 64 * KB, cancellationToken).ConfigureAwait(false);
-                    buffer.Position = 0;
-                    return await UploadChunkAsync(buffer, isFinalChunk, totalKnownSize, rangeStart, cancellationToken).ConfigureAwait(false);
+                    var uploadBuffer = new UploadBuffer(this, ChunkSize);
+                    bool reachedEof = await uploadBuffer.PopulateFromStreamAsync(chunkStream, cancellationToken).ConfigureAwait(false);
+                    if (!reachedEof)
+                    {
+                        throw new ArgumentException(
+                            $"Non-seekable chunk stream exceeds the configured ChunkSize ({ChunkSize} bytes). " +
+                            "Increase ChunkSize or pass a stream bounded to the chunk size.", nameof(chunkStream));
+                    }
+                    content = uploadBuffer.CreateContent(out int bufferedLength);
+                    chunkLength = bufferedLength;
                 }
 
                 if (!isFinalChunk && (chunkLength % MinimumChunkMultiple != 0))
@@ -196,7 +204,6 @@ namespace Google.Apis.Upload
                 }
 
                 using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
-                var content = new StreamContent(new NonDisposingStreamWrapper(chunkStream));
                 request.Content = content;
                 request.Content.Headers.Remove("Content-Range");
                 request.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {chunkStart}-{chunkEnd}/{totalLengthStr}");
