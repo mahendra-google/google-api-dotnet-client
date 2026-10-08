@@ -114,10 +114,11 @@ namespace Google.Apis.Tests.Apis.Upload
                 using var chunkStream = new MemoryStream(unalignedData);
                 var uploader = ResumableUpload.CreateFromUploadUri(sessionUri, chunkStream);
 
-                var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
-                    uploader.UploadChunkAsync(chunkStream, isFinalChunk: false));
+                var progress = await uploader.UploadChunkAsync(chunkStream, isFinalChunk: false);
 
-                Assert.Contains("256 KiB", ex.Message);
+                Assert.Equal(UploadStatus.Failed, progress.Status);
+                Assert.IsType<ArgumentException>(progress.Exception);
+                Assert.Contains("256 KiB", progress.Exception.Message);
                 Assert.Empty(server.ReceivedContentRanges);
             }
         }
@@ -278,10 +279,10 @@ namespace Google.Apis.Tests.Apis.Upload
                     await uploader.UploadChunkAsync(stream, isFinalChunk: false);
                 }
 
-                // Query status
-                long committedBytes = await uploader.QueryUploadStatusAsync();
+                // Query current upload status and commited byte offset on the server
+                var progress = await uploader.QueryUploadStatusAsync();
 
-                Assert.Equal(ResumableUpload.MinimumChunkMultiple, committedBytes);
+                Assert.Equal(ResumableUpload.MinimumChunkMultiple, progress.BytesSent);
                 Assert.Equal(2, server.ReceivedContentRanges.Count);
                 Assert.Equal("bytes */*", server.ReceivedContentRanges[1]);
             }
@@ -296,14 +297,17 @@ namespace Google.Apis.Tests.Apis.Upload
                 byte[] chunkData = new byte[ResumableUpload.MinimumChunkMultiple];
                 using var stream = new MemoryStream(chunkData);
 
-                await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                    uploader.UploadChunkAsync(stream, isFinalChunk: false));
+                var progress = await uploader.UploadChunkAsync(stream, isFinalChunk: false);
+                Assert.Equal(UploadStatus.Failed, progress.Status);
+                Assert.IsType<InvalidOperationException>(progress.Exception);
 
-                await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                    uploader.FinalizeUploadAsync(100));
+                var progressFinal = await uploader.FinalizeUploadAsync(100);
+                Assert.Equal(UploadStatus.Failed, progressFinal.Status);
+                Assert.IsType<InvalidOperationException>(progressFinal.Exception);
 
-                await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                    uploader.QueryUploadStatusAsync());
+                var progressStatus = await uploader.QueryUploadStatusAsync();
+                Assert.Equal(UploadStatus.Failed, progressStatus.Status);
+                Assert.IsType<InvalidOperationException>(progressStatus.Exception);
             }
         }
 
@@ -325,8 +329,8 @@ namespace Google.Apis.Tests.Apis.Upload
                 var progress = uploader.UploadChunk(stream, isFinalChunk: false);
                 Assert.Equal(UploadStatus.Uploading, progress.Status);
 
-                long offset = uploader.QueryUploadStatus();
-                Assert.Equal(ResumableUpload.MinimumChunkMultiple, offset);
+                var status = uploader.QueryUploadStatus();
+                Assert.Equal(ResumableUpload.MinimumChunkMultiple, status.BytesSent);
 
                 var finalProgress = uploader.FinalizeUpload(ResumableUpload.MinimumChunkMultiple);
                 Assert.Equal(UploadStatus.Completed, finalProgress.Status);

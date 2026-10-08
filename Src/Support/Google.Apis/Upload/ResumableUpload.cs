@@ -317,45 +317,76 @@ namespace Google.Apis.Upload
         }
 
         /// <summary>
-        /// Queries the upload session for the current committed byte offset on the server.
+        /// Queries the upload session for the current upload status and committed byte offset on the server.
         /// </summary>
         /// <remarks>
-        /// Sends an empty body request with a <c>Content-Range: bytes */*</c> header to determine how many bytes have been successfully persisted.
+        /// <para>
+        /// Sends an empty body request with a <c>Content-Range: bytes */*</c> header to determine how many bytes have been
+        /// successfully persisted or whether the upload has already been finalized.
+        /// </para>
+        /// <para>
+        /// The returned <see cref="IUploadProgress"/> indicates the state of the session:
+        /// <list type="bullet">
+        /// <item><description><see cref="UploadStatus.Uploading"/> if the session is still in progress (<c>308 Resume Incomplete</c>), with <see cref="IUploadProgress.BytesSent"/> set to the committed byte offset.</description></item>
+        /// <item><description><see cref="UploadStatus.Completed"/> if the upload was already finalized on the server.</description></item>
+        /// <item><description><see cref="UploadStatus.Failed"/> if an error occurred, with <see cref="IUploadProgress.Exception"/> containing the cause of the failure.</description></item>
+        /// </list>
+        /// </para>
         /// </remarks>
         /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
-        public async Task<long> QueryUploadStatusAsync(CancellationToken cancellationToken = default)
+        /// <returns>A task representing the asynchronous operation, returning the <see cref="IUploadProgress"/> of the upload session.</returns>
+        public async Task<IUploadProgress> QueryUploadStatusAsync(CancellationToken cancellationToken = default)
         {
-            if (UploadUri == null)
+            try
             {
-                throw new InvalidOperationException("Upload session has not been initiated.");
+                if (UploadUri == null)
+                {
+                    throw new InvalidOperationException("Upload session has not been initiated.");
+                }
+
+                using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
+                request.SetEmptyContent().Headers.TryAddWithoutValidation("Content-Range", "bytes */*");
+
+                HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+                if (response.StatusCode == (HttpStatusCode)308)
+                {
+                    string range = response.Headers.TryGetValues("Range", out var values) ? values.FirstOrDefault() : null;
+                    BytesServerReceived = GetNextByte(range);
+                    var progress = new ResumableUploadProgress(UploadStatus.Uploading, BytesServerReceived);
+                    UpdateProgress(progress);
+                    return progress;
+                }
+                else if (response.IsSuccessStatusCode)
+                {
+                    MediaCompleted(response);
+                    var progress = new ResumableUploadProgress(UploadStatus.Completed, BytesServerReceived);
+                    UpdateProgress(progress);
+                    return progress;
+                }
+                else
+                {
+                    var ex = await ExceptionForResponseAsync(response).ConfigureAwait(false);
+                    var progress = new ResumableUploadProgress(ex, BytesServerReceived);
+                    UpdateProgress(progress);
+                    return progress;
+                }
             }
-
-            using var request = new HttpRequestMessage(HttpMethod.Put, UploadUri);
-            request.SetEmptyContent().Headers.TryAddWithoutValidation("Content-Range", "bytes */*");
-
-            HttpResponseMessage response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-
-            if (response.StatusCode == (HttpStatusCode)308)
+            catch (Exception ex)
             {
-                string range = response.Headers.TryGetValues("Range", out var values) ? values.FirstOrDefault() : null;
-                BytesServerReceived = GetNextByte(range);
-                return BytesServerReceived;
+                Logger.Error(ex, "MediaUpload[{0}] - Exception occurred while querying upload status", UploadUri);
+                var progress = new ResumableUploadProgress(ex, BytesServerReceived);
+                UpdateProgress(progress);
+                return progress;
             }
-            else if (response.IsSuccessStatusCode)
-            {
-                MediaCompleted(response);
-                return BytesServerReceived;
-            }
-            return BytesServerReceived;
         }
 
         /// <summary>
         /// Synchronous wrapper for <see cref="QueryUploadStatusAsync(CancellationToken)"/>.
         /// </summary>
-        public long QueryUploadStatus()
-        {
-            return QueryUploadStatusAsync(CancellationToken.None).Result;
-        }
+        /// <returns>The <see cref="IUploadProgress"/> of the upload session.</returns>
+        public IUploadProgress QueryUploadStatus() =>
+            QueryUploadStatusAsync(CancellationToken.None).Result;
 
         #endregion
 
