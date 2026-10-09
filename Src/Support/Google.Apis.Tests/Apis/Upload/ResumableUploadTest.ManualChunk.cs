@@ -345,7 +345,7 @@ namespace Google.Apis.Tests.Apis.Upload
         [Fact]
         public async Task TestUploadChunk_ZeroByteIntermediateChunk_ReturnsFailedProgress()
         {
-            using (var server = new ManualChunkServer(_server))           
+            using (var server = new ManualChunkServer(_server))
             using (var service = new MockClientService(server.HttpPrefix))
             {
                 var tmpUploader = new TestResumableUpload(service, "ManualChunk", "POST", Stream.Null, "text/plain", 100);
@@ -360,7 +360,7 @@ namespace Google.Apis.Tests.Apis.Upload
                 Assert.IsType<ArgumentException>(progress.Exception);
                 Assert.Empty(server.ReceivedContentRanges);
             }
-       }
+        }
 
         [Fact]
         public async Task TestManualChunkOperations_ServerError_ReturnsFailedProgress()
@@ -368,7 +368,7 @@ namespace Google.Apis.Tests.Apis.Upload
             using (var server = new ManualChunkServer(_server) { ForcedErrorStatusCode = 410 })
             using (var service = new MockClientService(server.HttpPrefix))
             {
-               var tmpUploader = new TestResumableUpload(service, "ManualChunk", "POST", Stream.Null, "text/plain", 100);
+                var tmpUploader = new TestResumableUpload(service, "ManualChunk", "POST", Stream.Null, "text/plain", 100);
                 var sessionUri = await tmpUploader.InitiateSessionAsync();
                 var uploader = ResumableUpload.CreateFromUploadUri(sessionUri, Stream.Null);
 
@@ -385,7 +385,7 @@ namespace Google.Apis.Tests.Apis.Upload
                 Assert.Equal(UploadStatus.Failed, finalizeProgress.Status);
                 Assert.IsType<GoogleApiException>(finalizeProgress.Exception);
 
-                var statusProgress = await uploader.QueryUploadStatusAsync();                
+                var statusProgress = await uploader.QueryUploadStatusAsync();             
                 Assert.NotNull(statusProgress);
                 Assert.Equal(UploadStatus.Failed, statusProgress.Status);
                 Assert.IsType<GoogleApiException>(statusProgress.Exception);

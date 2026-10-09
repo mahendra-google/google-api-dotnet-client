@@ -128,15 +128,7 @@ namespace Google.Apis.Upload
         /// <param name="isFinalChunk"><c>true</c> if this is the final chunk completing the upload; <c>false</c> if more chunks follow.</param>
         /// <param name="totalKnownSize">The total known size of the object if known upfront, or <c>null</c> if unknown.</param>
         /// <param name="rangeStart">
-        /// The starting byte offset for this chunk.
-        /// <para>
-        /// Passing an explicit offset avoids an extra <c>QueryUploadStatusAsync</c> call:
-        /// <list type="bullet">
-        /// <item><description>Pass <c>0</c> for the initial chunk.</description></item>
-        /// <item><description>Pass the current offset if it is already tracked by the caller.</description></item>
-        /// </list>
-        /// If <c>null</c>, the method queries the upload status to retrieve the current offset.
-        /// </para>
+        /// The starting byte offset for this chunk, or <c>null</c> to use the internal server-received byte offset (<see cref="BytesServerReceived"/>).
         /// </param>
         /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         public async Task<IUploadProgress> UploadChunkAsync(
@@ -146,18 +138,17 @@ namespace Google.Apis.Upload
             long? rangeStart = null,
             CancellationToken cancellationToken = default)
         {
+            chunkStream.ThrowIfNull(nameof(chunkStream));
             if (totalKnownSize < 0)
             {
                 throw new ArgumentOutOfRangeException(nameof(totalKnownSize), "Total known size must be non-negative.");
             }
             if (rangeStart < 0)
             {
-               throw new ArgumentOutOfRangeException(nameof(rangeStart), "Range start must be non-negative.");
+                throw new ArgumentOutOfRangeException(nameof(rangeStart), "Range start must be non-negative.");
             }
             try
             {
-                chunkStream.ThrowIfNull(nameof(chunkStream));
-
                 if (UploadUri == null)
                 {
                     throw new InvalidOperationException(
