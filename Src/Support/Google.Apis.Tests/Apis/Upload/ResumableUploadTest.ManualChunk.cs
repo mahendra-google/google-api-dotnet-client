@@ -30,7 +30,7 @@ namespace Google.Apis.Tests.Apis.Upload
         {
             public List<byte> ReceivedBytes { get; } = new List<byte>();
             public List<string> ReceivedContentRanges { get; } = new List<string>();
-
+            public int? ForcedErrorStatusCode { get; set; }
             public ManualChunkServer(TestServer server) : base(server) { }
 
             protected override async Task<IEnumerable<byte>> HandleCall(HttpListenerRequest request, HttpListenerResponse response)
@@ -44,6 +44,11 @@ namespace Google.Apis.Tests.Apis.Upload
                     case UploadPath:
                         string contentRange = request.Headers["Content-Range"];
                         ReceivedContentRanges.Add(contentRange);
+                        if (ForcedErrorStatusCode.HasValue)
+                        {
+                            response.StatusCode = ForcedErrorStatusCode.Value;
+                            return Encoding.UTF8.GetBytes("{\"error\":{\"message\":\"Simulated server error\"}}");
+                        }
 
                         var bytesStream = new MemoryStream();
                         await request.InputStream.CopyToAsync(bytesStream);
@@ -101,7 +106,7 @@ namespace Google.Apis.Tests.Apis.Upload
         }
 
         [Fact]
-        public async Task TestUploadChunk_UnalignedIntermediateChunk_ThrowsArgumentException()
+        public async Task TestUploadChunk_UnalignedIntermediateChunk_ReturnsFailedProgress()
         {
             using (var server = new ManualChunkServer(_server))
             using (var service = new MockClientService(server.HttpPrefix))
@@ -289,7 +294,7 @@ namespace Google.Apis.Tests.Apis.Upload
         }
 
         [Fact]
-        public async Task TestUploadChunk_UninitiatedSession_ThrowsInvalidOperationException()
+        public async Task TestUploadChunk_UninitiatedSession_ReturnsFailedProgress()
         {
             using (var service = new MockClientService("http://localhost/"))
             {
@@ -334,6 +339,56 @@ namespace Google.Apis.Tests.Apis.Upload
 
                 var finalProgress = uploader.FinalizeUpload(ResumableUpload.MinimumChunkMultiple);
                 Assert.Equal(UploadStatus.Completed, finalProgress.Status);
+            }
+        }
+         
+        [Fact]
+        public async Task TestUploadChunk_ZeroByteIntermediateChunk_ReturnsFailedProgress()
+        {
+            using (var server = new ManualChunkServer(_server))           
+            using (var service = new MockClientService(server.HttpPrefix))
+            {
+                var tmpUploader = new TestResumableUpload(service, "ManualChunk", "POST", Stream.Null, "text/plain", 100);
+                var sessionUri = await tmpUploader.InitiateSessionAsync();
+
+                using var emptyStream = new MemoryStream(Array.Empty<byte>());
+                var uploader = ResumableUpload.CreateFromUploadUri(sessionUri, emptyStream);
+
+                var progress = await uploader.UploadChunkAsync(emptyStream, isFinalChunk: false);
+
+                Assert.Equal(UploadStatus.Failed, progress.Status);
+                Assert.IsType<ArgumentException>(progress.Exception);
+                Assert.Empty(server.ReceivedContentRanges);
+            }
+       }
+
+        [Fact]
+        public async Task TestManualChunkOperations_ServerError_ReturnsFailedProgress()
+        {
+            using (var server = new ManualChunkServer(_server) { ForcedErrorStatusCode = 410 })
+            using (var service = new MockClientService(server.HttpPrefix))
+            {
+               var tmpUploader = new TestResumableUpload(service, "ManualChunk", "POST", Stream.Null, "text/plain", 100);
+                var sessionUri = await tmpUploader.InitiateSessionAsync();
+                var uploader = ResumableUpload.CreateFromUploadUri(sessionUri, Stream.Null);
+
+                byte[] chunkData = new byte[ResumableUpload.MinimumChunkMultiple];
+                using var stream = new MemoryStream(chunkData);
+
+                var chunkProgress = await uploader.UploadChunkAsync(stream, isFinalChunk: false);
+                Assert.NotNull(chunkProgress);
+                Assert.Equal(UploadStatus.Failed, chunkProgress.Status);
+                Assert.IsType<GoogleApiException>(chunkProgress.Exception);
+
+                var finalizeProgress = await uploader.FinalizeUploadAsync(ResumableUpload.MinimumChunkMultiple);
+                Assert.NotNull(finalizeProgress);
+                Assert.Equal(UploadStatus.Failed, finalizeProgress.Status);
+                Assert.IsType<GoogleApiException>(finalizeProgress.Exception);
+
+                var statusProgress = await uploader.QueryUploadStatusAsync();                
+                Assert.NotNull(statusProgress);
+                Assert.Equal(UploadStatus.Failed, statusProgress.Status);
+                Assert.IsType<GoogleApiException>(statusProgress.Exception);
             }
         }
     }

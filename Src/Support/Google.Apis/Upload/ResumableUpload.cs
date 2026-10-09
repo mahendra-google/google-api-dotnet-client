@@ -146,9 +146,18 @@ namespace Google.Apis.Upload
             long? rangeStart = null,
             CancellationToken cancellationToken = default)
         {
-            chunkStream.ThrowIfNull(nameof(chunkStream));
+            if (totalKnownSize < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(totalKnownSize), "Total known size must be non-negative.");
+            }
+            if (rangeStart < 0)
+            {
+               throw new ArgumentOutOfRangeException(nameof(rangeStart), "Range start must be non-negative.");
+            }
             try
             {
+                chunkStream.ThrowIfNull(nameof(chunkStream));
+
                 if (UploadUri == null)
                 {
                     throw new InvalidOperationException(
@@ -176,10 +185,10 @@ namespace Google.Apis.Upload
                     chunkLength = bufferedLength;
                 }
 
-                if (!isFinalChunk && (chunkLength % MinimumChunkMultiple != 0))
+                if (!isFinalChunk && (chunkLength <= 0 || chunkLength % MinimumChunkMultiple != 0))
                 {
                     throw new ArgumentException(
-                        $"Intermediate chunk size ({chunkLength} bytes) must be a multiple of 256 KiB (262,144 bytes). " +
+                        $"Intermediate chunk size ({chunkLength} bytes) must be a positive multiple of 256 KiB (262,144 bytes). " +
                         "Only the final chunk can have an arbitrary byte size.", nameof(chunkStream));
                 }
                 if (chunkLength == 0 && isFinalChunk)
@@ -229,24 +238,24 @@ namespace Google.Apis.Upload
                 }
                 else if (response.IsSuccessStatusCode)
                 {
-                    if (isFinalChunk)
-                    {
-                        StreamLength = chunkStart + chunkLength;
-                    }
+                    StreamLength = chunkStart + chunkLength;
                     MediaCompleted(response);
                     var progress = new ResumableUploadProgress(UploadStatus.Completed, BytesServerReceived);
                     UpdateProgress(progress);
                     return progress;
                 }
+                else
+                {
+                    throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
+                }
             }
             catch (Exception ex)
             {
-                Logger.Error(ex, "MediaUpload[{0}] - Exception occurred while finalzing media", UploadUri);
+                Logger.Error(ex, "MediaUpload[{0}] - Exception occurred while uploading chunk", UploadUri);
                 var progress = new ResumableUploadProgress(ex, BytesServerReceived);
                 UpdateProgress(progress);
                 return progress;
             }
-            return Progress;
         }
 
         /// <summary>
@@ -256,19 +265,11 @@ namespace Google.Apis.Upload
         /// <param name="isFinalChunk"><c>true</c> if this is the final chunk completing the upload; <c>false</c> if more chunks follow.</param>
         /// <param name="totalKnownSize">The total known size of the object if known upfront, or <c>null</c> if unknown.</param>
         /// <param name="rangeStart">
-        /// The starting byte offset for this chunk.
-        /// <para>
-        /// Passing an explicit offset avoids an extra <c>QueryUploadStatusAsync</c> call:
-        /// <list type="bullet">
-        /// <item><description>Pass <c>0</c> for the initial chunk.</description></item>
-        /// <item><description>Pass the current offset if it is already tracked by the caller.</description></item>
-        /// </list>
-        /// If <c>null</c>, the method queries the upload status to retrieve the current offset.
-        /// </para>
+        /// The starting byte offset for this chunk, or <c>null</c> to use the internal server-received byte offset (<see cref="BytesServerReceived"/>).
         /// </param>
         public IUploadProgress UploadChunk(Stream chunkStream, bool isFinalChunk, long? totalKnownSize = null, long? rangeStart = null)
         {
-            return UploadChunkAsync(chunkStream, isFinalChunk, totalKnownSize, rangeStart, CancellationToken.None).Result;
+            return UploadChunkAsync(chunkStream, isFinalChunk, totalKnownSize, rangeStart, CancellationToken.None).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -281,6 +282,10 @@ namespace Google.Apis.Upload
         /// <param name="cancellationToken">The token to monitor for cancellation requests.</param>
         public async Task<IUploadProgress> FinalizeUploadAsync(long totalSize, CancellationToken cancellationToken = default)
         {
+            if (totalSize < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(totalSize), "Total size must be non-negative.");
+            }
             try
             {
                 if (UploadUri == null)
@@ -303,15 +308,18 @@ namespace Google.Apis.Upload
                     UpdateProgress(progress);
                     return progress;
                 }
+                else
+                {
+                    throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
+                }
             }
             catch (Exception ex)
             {
-                Logger.Error(ex, "MediaUpload[{0}] - Exception occurred while finalzing media", UploadUri);
-                var progress = new ResumableUploadProgress(ex, totalSize);
+                Logger.Error(ex, "MediaUpload[{0}] - Exception occurred while finalizing media", UploadUri);
+                var progress = new ResumableUploadProgress(ex, BytesServerReceived);
                 UpdateProgress(progress);
                 return progress;
             }
-            return Progress;
         }
 
         /// <summary>
@@ -320,7 +328,7 @@ namespace Google.Apis.Upload
         /// <param name="totalSize">The total size of the uploaded object in bytes. Must be non-negative.</param>
         public IUploadProgress FinalizeUpload(long totalSize)
         {
-            return FinalizeUploadAsync(totalSize, CancellationToken.None).Result;
+            return FinalizeUploadAsync(totalSize, CancellationToken.None).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -366,6 +374,7 @@ namespace Google.Apis.Upload
                 }
                 else if (response.IsSuccessStatusCode)
                 {
+                    StreamLength = StreamLength > 0 ? StreamLength : BytesServerReceived;
                     MediaCompleted(response);
                     var progress = new ResumableUploadProgress(UploadStatus.Completed, BytesServerReceived);
                     UpdateProgress(progress);
@@ -373,10 +382,7 @@ namespace Google.Apis.Upload
                 }
                 else
                 {
-                    var ex = await ExceptionForResponseAsync(response).ConfigureAwait(false);
-                    var progress = new ResumableUploadProgress(ex, BytesServerReceived);
-                    UpdateProgress(progress);
-                    return progress;
+                    throw await ExceptionForResponseAsync(response).ConfigureAwait(false);
                 }
             }
             catch (Exception ex)
@@ -393,7 +399,7 @@ namespace Google.Apis.Upload
         /// </summary>
         /// <returns>The <see cref="IUploadProgress"/> of the upload session.</returns>
         public IUploadProgress QueryUploadStatus() =>
-            QueryUploadStatusAsync(CancellationToken.None).Result;
+            QueryUploadStatusAsync(CancellationToken.None).GetAwaiter().GetResult();
 
         #endregion
 
